@@ -3,7 +3,7 @@ if __name__ == "__main__":
 
     train_dataset, val_dataset, test_dataset = get_sft_datasets()
 
-    model, tokenizer = load_model_and_tokenizer()
+    model, tokenizer = load_model_and_tokenizer(model_name="openai-community/gpt2-medium")
 
     # create training arguments
     training_args = create_training_arguments()
@@ -19,3 +19,5 @@ if __name__ == "__main__":
 
     # train and save
     train_and_save(trainer)
+
+

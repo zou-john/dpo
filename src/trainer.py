@@ -82,7 +82,7 @@ Assistant:
 def create_training_arguments(
     output_dir: str = "./sft_output",
     num_train_epochs: int = 3,
-    per_device_train_batch_size: int = 32,
+    per_device_train_batch_size: int = 16,
     gradient_accumulation_steps: int = 1,
     learning_rate: float = 2e-5,
     warmup_steps: int = 50,
