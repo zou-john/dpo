@@ -73,6 +73,9 @@ Assistant:
     # Ensure EOS token exists
     if tokenizer.eos_token is None:
         tokenizer.add_special_tokens({"eos_token": "</s>"})
+    
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
     model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
     
