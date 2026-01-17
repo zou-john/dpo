@@ -1,7 +1,7 @@
 if __name__ == "__main__":
     import argparse
     from src.dataset import get_sft_datasets, get_dpo_datasets
-    from src.trainer import load_model_and_tokenizer, create_sft_trainer, create_dpo_trainer, setup_dpo_training, train_and_save
+    from src.trainer import load_model_and_tokenizer, create_sft_trainer, setup_dpo_training, train_and_save
     
     parser = argparse.ArgumentParser(description="Train model with SFT or DPO")
     parser.add_argument(
