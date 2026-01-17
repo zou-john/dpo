@@ -17,7 +17,7 @@ TRAIN_FILE = "hh_rlhf_train_10k.csv"
 VAL_FILE = "hh_rlhf_val_3k.csv"
 TEST_FILE = "hh_rlhf_test_1k.csv"
 
-def getResponse(chosen, rejected, pattern):
+def getResponse(chosen, rejected, pattern, training_mode):
     """
     Given a list of Human and Assistant conversation we want to parse out the prompt,
     chosen, and rejected
@@ -35,34 +35,43 @@ def getResponse(chosen, rejected, pattern):
     if not chosen_matches:
         return None, None, None
 
-    # build conversation until last Assistant response
-    prompt_parts = []
-    last_assistant_idx = -1
+    if training_mode == "sft":
+        # build conversation until last Assistant response
+        prompt_parts = []
+        last_assistant_idx = -1
 
-    # find the last Assistant response
-    for i, (role, text, _) in enumerate(chosen_matches):
-        if role == "Assistant":
-            last_assistant_idx = i
+        # find the last Assistant response
+        for i, (role, text, _) in enumerate(chosen_matches):
+            if role == "Assistant":
+                last_assistant_idx = i
 
-    # cannot find 'Assistant'
-    if last_assistant_idx == -1:
+        # cannot find 'Assistant'
+        if last_assistant_idx == -1:
+            return None, None, None
+
+        # everything before last Assistant is the prompt
+        for i in range(last_assistant_idx):
+            role, text, _ = chosen_matches[i]
+            prompt_parts.append(f"{role}: {text.strip()}")
+
+        prompt = "\n\n".join(prompt_parts)
+
+        # last Assistant response is the chosen/rejected (depends on your data structure)
+        _, chosen_response, _ = chosen_matches[last_assistant_idx]
+        _, rejected_response, _ = rejected_matches[last_assistant_idx]
+        chosen, rejected = chosen_response.strip(), rejected_response.strip()
+    
+        return prompt, chosen, rejected
+
+    elif training_mode == "dpo":
+        prompt = ""
+        chosen = chosen.strip()
+        rejected = rejected.strip()
+        return prompt, chosen, rejected
+    else:
         return None, None, None
 
-    # everything before last Assistant is the prompt
-    for i in range(last_assistant_idx):
-        role, text, _ = chosen_matches[i]
-        prompt_parts.append(f"{role}: {text.strip()}")
-
-    prompt = "\n\n".join(prompt_parts)
-
-    # last Assistant response is the chosen/rejected (depends on your data structure)
-    _, chosen_response, _ = chosen_matches[last_assistant_idx]
-    _, rejected_response, _ = rejected_matches[last_assistant_idx]
-    chosen, rejected = chosen_response.strip(), rejected_response.strip()
-
-    return prompt, chosen, rejected
-
-def processFile(filepath):
+def processFile(filepath, training_mode):
     """
     Process a single CSV file and return a DataFrame
     """
@@ -76,7 +85,7 @@ def processFile(filepath):
 
     for idx, row in df.iterrows():
         chosen, rejected = row["chosen"], row["rejected"]
-        prompt, chosen_text, rejected_text = getResponse(chosen, rejected, pattern)
+        prompt, chosen_text, rejected_text = getResponse(chosen, rejected, pattern, training_mode)
 
         if prompt == False: continue
         if prompt is not None:
@@ -88,16 +97,63 @@ def processFile(filepath):
 
     return pd.DataFrame(processed_data)
 
-def createDatasets(folder, files):
+def createDatasets(folder, files, training_mode):
     """
     Create three separate DataFrames for train, validation, and test
     Returns: train_df, val_df, test_df
     """
-    train_df = processFile(folder + files[0])
-    val_df = processFile(folder + files[1])
-    test_df = processFile(folder + files[2])
+    train_df = processFile(folder + files[0], training_mode)
+    val_df = processFile(folder + files[1], training_mode)
+    test_df = processFile(folder + files[2], training_mode)
 
     return train_df, val_df, test_df
+
+def parse_conversation(text):
+    """
+    Parse a conversation string into message format
+    """
+    # Replace markers with delimiters
+    text = text.replace("Human:", "|||HUMAN|||")
+    text = text.replace("Assistant:", "|||ASSISTANT|||")
+    
+    parts = text.split("|||")
+    
+    messages = []
+    current_role = None
+    current_content = ""
+    
+    for part in parts:
+        part = part.strip()
+        
+        if part == "HUMAN":
+            # Save previous message if exists
+            if current_role and current_content.strip():
+                messages.append({
+                    "role": current_role,
+                    "content": current_content.strip()
+                })
+            current_role = "user"
+            current_content = ""
+        elif part == "ASSISTANT":
+            # Save previous message if exists
+            if current_role and current_content.strip():
+                messages.append({
+                    "role": current_role,
+                    "content": current_content.strip()
+                })
+            current_role = "assistant"
+            current_content = ""
+        elif part:
+            current_content += part
+    
+    # Don't forget the last message
+    if current_role and current_content.strip():
+        messages.append({
+            "role": current_role,
+            "content": current_content.strip()
+        })
+    
+    return messages
 
 """
 Creating the Dataset class
@@ -150,11 +206,44 @@ class SFTPreprocessor:
         
         return examples
 
+class DPOPreprocessor:
+    """
+    Preprocessor for Direct Preference Optimization (DPO) data
+    """
+    def __init__(self, dataframe):
+        self.data = dataframe.reset_index(drop=True).copy()
+    
+    def build(self):
+        """
+        Build DPO dataset with chosen and rejected message pairs
+        """
+        examples = []
+        
+        for idx in range(len(self.data)):
+            row = self.data.iloc[idx]
+            chosen = row["chosen"]
+            rejected = row["rejected"]
+            
+            # Process chosen conversation
+            chosen_messages = parse_conversation(chosen)
+            
+            # Process rejected conversation
+            rejected_messages = parse_conversation(rejected)
+            
+            # Only add if both conversations parsed successfully
+            if chosen_messages and rejected_messages:
+                examples.append({
+                    "chosen": chosen_messages,
+                    "rejected": rejected_messages
+                })
+        
+        return examples
+
 def get_sft_datasets():
     """
     Get the SFT datasets
     """
-    train_df, val_df, test_df = createDatasets(FOLDER, [TRAIN_FILE, VAL_FILE, TEST_FILE])
+    train_df, val_df, test_df = createDatasets(FOLDER, [TRAIN_FILE, VAL_FILE, TEST_FILE], "sft")
     train_dataset = SFTPreprocessor(train_df).build()
     val_dataset = SFTPreprocessor(val_df).build()
     test_dataset = SFTPreprocessor(test_df).build()
@@ -165,65 +254,25 @@ def get_sft_datasets():
     test_dataset = HFDataset.from_list(test_dataset)
     return train_dataset, val_dataset, test_dataset
 
+def get_dpo_datasets():
+    """
+    Get the DPO datasets
+    """
+    train_df, val_df, test_df = createDatasets(FOLDER, [TRAIN_FILE, VAL_FILE, TEST_FILE], "dpo") # pandas dataframe
+
+    train_dataset = DPOPreprocessor(train_df).build() # to list
+    val_dataset = DPOPreprocessor(val_df).build()
+    test_dataset = DPOPreprocessor(test_df).build()
+
+    # convert to HuggingFace Dataset objects
+    train_dataset = HFDataset.from_list(train_dataset) # to huggingface dataset
+    val_dataset = HFDataset.from_list(val_dataset)
+    test_dataset = HFDataset.from_list(test_dataset)
+
+    return train_dataset, val_dataset, test_dataset
+
+if __name__ == "__main__":
+    train_dataset, val_dataset, test_dataset = get_dpo_datasets()
 
 
-
-
-
-
-
-
-
-
-
-class DPODataset(Dataset):
-    """DPO dataset without prompts — only chosen and rejected completions."""
-
-    def __init__(self, dataframe, tokenizer, max_length):
-        """
-        Args:
-            dataframe: pandas DataFrame with 'prompt', 'chosen', 'rejected' columns
-            tokenizer: HuggingFace tokenizer
-            max_length: maximum sequence length for tokenization
-        """
-        self.data = dataframe.reset_index(drop=True)  # use the dataframe directly
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-
-    def __len__(self):
-        return len(self.data)
-
-    def _tokenize(self, text: str):
-        """Tokenize a single text string."""
-        return self.tokenizer(
-            text,
-            max_length=self.max_length,
-            truncation=True,
-            padding='max_length',
-            add_special_tokens=True,
-            return_tensors='pt'
-        )
-
-    def __getitem__(self, idx: int) -> dict:
-        """Get a single item from the dataset."""
-        row = self.data.iloc[idx]
-
-        # get individual components
-        prompt = str(row['prompt'])
-        chosen = str(row['chosen'])
-        rejected = str(row['rejected'])
-
-        # tokenize each separately
-        prompt_tokens = self._tokenize(prompt)
-        chosen_tokens = self._tokenize(chosen)
-        rejected_tokens = self._tokenize(rejected)
-
-        return {
-            'prompt_input_ids': prompt_tokens['input_ids'].squeeze(0),
-            'prompt_attention_mask': prompt_tokens['attention_mask'].squeeze(0),
-            'chosen_input_ids': chosen_tokens['input_ids'].squeeze(0),
-            'chosen_attention_mask': chosen_tokens['attention_mask'].squeeze(0),
-            'rejected_input_ids': rejected_tokens['input_ids'].squeeze(0),
-            'rejected_attention_mask': rejected_tokens['attention_mask'].squeeze(0),
-        }
 

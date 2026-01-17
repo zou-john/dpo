@@ -1,6 +1,6 @@
 """
-SFT Trainer Module
-Organized trainer setup for Supervised Fine-Tuning
+Combined Trainer Module
+Organized trainer setup for both SFT and DPO
 """
 import torch
 from transformers import (
@@ -9,7 +9,7 @@ from transformers import (
     TrainingArguments,
     TrainerCallback,
 )
-from trl import SFTTrainer
+from trl import SFTTrainer, DPOTrainer, DPOConfig
 from datasets import Dataset as HFDataset
 from typing import Optional
 
@@ -17,31 +17,24 @@ from typing import Optional
 class PrintStepCallback(TrainerCallback):
     """Callback to print training progress."""
     
+    def __init__(self, training_type: str = ""):
+        self.training_type = training_type
+    
     def on_train_begin(self, args, state, control, **kwargs):
-        print("🚀 TRAINING STARTED")
+        prefix = f"{self.training_type.upper()} " if self.training_type else ""
+        print(f"🚀 {prefix}TRAINING STARTED")
 
     def on_step_end(self, args, state, control, **kwargs):
-        print(f"Step {state.global_step}")
+        if state.global_step % 10 == 0:
+            print(f"Step {state.global_step}")
 
 
 def load_model_and_tokenizer(
     model_name: str = "EleutherAI/pythia-1.4b",
-    torch_dtype: Optional[torch.dtype] = None,
-    device_map: Optional[str] = None,
+    device_map: str = "auto",
 ):
-    """
-    Load model and tokenizer from HuggingFace.
-    
-    Args:
-        model_name: Name or path of the model
-        torch_dtype: Data type for model weights (default: float16 if CUDA available)
-        device_map: Device mapping strategy (e.g., "auto")
-    
-    Returns:
-        Tuple of (model, tokenizer)
-    """
-    if torch_dtype is None:
-        torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    """Load model and tokenizer from HuggingFace."""
+    torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
     
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -63,84 +56,45 @@ Assistant:
 {% endif %}
 """
     
-    # Load model
-    model_kwargs = {
-        "torch_dtype": torch_dtype,
-    }
-    if device_map:
-        model_kwargs["device_map"] = device_map
-    
-    # Ensure EOS token exists
+    # Ensure tokens exist
     if tokenizer.eos_token is None:
         tokenizer.add_special_tokens({"eos_token": "</s>"})
-    
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
-    
-    # Set pad token if not set
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    # Load model
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        torch_dtype=torch_dtype,
+        device_map=device_map
+    )
     
     return model, tokenizer
 
 
-def create_training_arguments(
+# ==================== SFT TRAINER ====================
+
+def create_sft_training_arguments(
     output_dir: str = "./sft_output",
     num_train_epochs: int = 3,
-    per_device_train_batch_size: int = 4,
-    gradient_accumulation_steps: int = 1,
     learning_rate: float = 2e-5,
-    warmup_steps: int = 50,
-    logging_steps: int = 10,
-    eval_strategy: str = "steps",
-    eval_steps: int = 100,
-    save_steps: int = 500,
-    fp16: bool = False,
-    bf16: bool = True,
-    report_to: str = "none",
-    **kwargs
+    per_device_train_batch_size: int = 4,
 ) -> TrainingArguments:
-    """
-    Create training arguments for SFT training.
-    
-    Args:
-        output_dir: Directory to save outputs
-        num_train_epochs: Number of training epochs
-        per_device_train_batch_size: Batch size per device
-        gradient_accumulation_steps: Number of gradient accumulation steps
-        learning_rate: Learning rate
-        warmup_steps: Number of warmup steps
-        logging_steps: Log every N steps
-        eval_strategy: Evaluation strategy ("steps", "epoch", "no")
-        eval_steps: Evaluate every N steps
-        save_steps: Save checkpoint every N steps
-        fp16: Use mixed precision training (default: True if CUDA available)
-        report_to: Where to report metrics ("none", "tensorboard", "wandb", etc.)
-        **kwargs: Additional arguments to pass to TrainingArguments
-    
-    Returns:
-        TrainingArguments object
-    """
-    if fp16 is None:
-        fp16 = torch.cuda.is_available()
-    
+    """Create training arguments for SFT training."""
     return TrainingArguments(
         output_dir=output_dir,
         num_train_epochs=num_train_epochs,
         per_device_train_batch_size=per_device_train_batch_size,
-        gradient_accumulation_steps=gradient_accumulation_steps,
+        gradient_accumulation_steps=1,
         learning_rate=learning_rate,
-        warmup_steps=warmup_steps,
-        logging_steps=logging_steps,
-        eval_strategy=eval_strategy,
-        eval_steps=eval_steps,
-        save_steps=save_steps,
-        fp16=fp16,
-        bf16=bf16,
-        report_to=report_to,
-        **kwargs
+        warmup_steps=50,
+        logging_steps=10,
+        eval_strategy="steps",
+        eval_steps=100,
+        save_steps=500,
+        fp16=False,
+        bf16=True,
+        report_to="none",
     )
 
 
@@ -149,30 +103,16 @@ def create_sft_trainer(
     tokenizer,
     train_dataset: HFDataset,
     eval_dataset: Optional[HFDataset] = None,
-    training_args: Optional[TrainingArguments] = None,
-    callbacks: Optional[list] = None,
-    **kwargs
+    output_dir: str = "./sft_output",
+    num_train_epochs: int = 3,
+    learning_rate: float = 2e-5,
 ) -> SFTTrainer:
-    """
-    Create SFTTrainer instance.
-    
-    Args:
-        model: The model to train
-        tokenizer: The tokenizer to use
-        train_dataset: Training dataset
-        eval_dataset: Optional evaluation dataset
-        training_args: TrainingArguments object (will create default if None)
-        callbacks: List of callbacks (default: includes PrintStepCallback)
-        **kwargs: Additional arguments to pass to SFTTrainer
-    
-    Returns:
-        SFTTrainer instance
-    """
-    if training_args is None:
-        training_args = create_training_arguments()
-    
-    if callbacks is None:
-        callbacks = [PrintStepCallback()]
+    """Create SFTTrainer instance."""
+    training_args = create_sft_training_arguments(
+        output_dir=output_dir,
+        num_train_epochs=num_train_epochs,
+        learning_rate=learning_rate,
+    )
     
     return SFTTrainer(
         model=model,
@@ -180,36 +120,123 @@ def create_sft_trainer(
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         processing_class=tokenizer,
-        callbacks=callbacks,
-        **kwargs
+        callbacks=[PrintStepCallback(training_type="SFT")],
     )
 
 
-def train_and_save(
-    trainer: SFTTrainer,
-    save_path: str = "./final_sft_model",
-    evaluate: bool = True,
+# ==================== DPO TRAINER ====================
+
+def create_dpo_config(
+    output_dir: str = "./dpo_output",
+    num_train_epochs: int = 3,
+    learning_rate: float = 5e-7,
+    per_device_train_batch_size: int = 4,
+    beta: float = 0.1,
+) -> DPOConfig:
+    """Create DPO configuration for training."""
+    return DPOConfig(
+        output_dir=output_dir,
+        num_train_epochs=num_train_epochs,
+        per_device_train_batch_size=per_device_train_batch_size,
+        gradient_accumulation_steps=1,
+        learning_rate=learning_rate,
+        warmup_steps=50,
+        logging_steps=10,
+        eval_strategy="steps",
+        eval_steps=100,
+        save_steps=500,
+        fp16=False,
+        bf16=True,
+        report_to="none",
+        beta=beta,
+        loss_type="sigmoid",
+        max_length=512,
+        max_prompt_length=256,
+    )
+
+
+def create_dpo_trainer(
+    model,
+    ref_model,
+    tokenizer,
+    train_dataset: HFDataset,
+    eval_dataset: Optional[HFDataset] = None,
+    output_dir: str = "./dpo_output",
+    num_train_epochs: int = 3,
+    learning_rate: float = 5e-7,
+    beta: float = 0.1,
+) -> DPOTrainer:
+    """Create DPOTrainer instance."""
+    training_args = create_dpo_config(
+        output_dir=output_dir,
+        num_train_epochs=num_train_epochs,
+        learning_rate=learning_rate,
+        beta=beta,
+    )
+    
+    return DPOTrainer(
+        model=model,
+        ref_model=ref_model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        processing_class=tokenizer,
+        callbacks=[PrintStepCallback(training_type="DPO")],
+    )
+
+
+def setup_dpo_training(
+    model_name: str,
+    train_dataset: HFDataset,
+    eval_dataset: Optional[HFDataset] = None,
+    output_dir: str = "./dpo_output",
+    num_train_epochs: int = 3,
+    learning_rate: float = 5e-7,
 ):
     """
-    Train the model, optionally evaluate, and save.
-    
-    Args:
-        trainer: SFTTrainer instance
-        save_path: Path to save the final model
-        evaluate: Whether to run evaluation after training
+    Convenience function to set up DPO training with all components.
+    Creates both policy model and frozen reference model.
     """
-    # Train
+    # Load policy model and tokenizer
+    model, tokenizer = load_model_and_tokenizer(model_name)
+    
+    # Create reference model (frozen copy)
+    ref_model, _ = load_model_and_tokenizer(model_name)
+    ref_model.eval()
+    for param in ref_model.parameters():
+        param.requires_grad = False
+    
+    # Create trainer
+    trainer = create_dpo_trainer(
+        model=model,
+        ref_model=ref_model,
+        tokenizer=tokenizer,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        output_dir=output_dir,
+        num_train_epochs=num_train_epochs,
+        learning_rate=learning_rate,
+    )
+    
+    return trainer, model, ref_model, tokenizer
+
+
+# ==================== SHARED FUNCTIONS ====================
+
+def train_and_save(
+    trainer,
+    save_path: str,
+    evaluate: bool = True,
+):
+    """Train the model, optionally evaluate, and save."""
     print("Starting training...")
     trainer.train()
     
-    # Evaluate
-    if evaluate:
+    if evaluate and trainer.eval_dataset is not None:
         print("Running evaluation...")
-        trainer.evaluate()
+        metrics = trainer.evaluate()
+        print(f"Evaluation metrics: {metrics}")
     
-    # Save model
     print(f"Saving model to {save_path}...")
     trainer.save_model(save_path)
     print("Training complete!")
-
-
