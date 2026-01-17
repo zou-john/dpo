@@ -70,6 +70,10 @@ Assistant:
     if device_map:
         model_kwargs["device_map"] = device_map
     
+    # Ensure EOS token exists
+    if tokenizer.eos_token is None:
+        tokenizer.add_special_tokens({"eos_token": "</s>"})
+
     model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
     
     # Set pad token if not set
