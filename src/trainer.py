@@ -97,7 +97,8 @@ def create_training_arguments(
     eval_strategy: str = "steps",
     eval_steps: int = 100,
     save_steps: int = 500,
-    fp16: Optional[bool] = None,
+    fp16: bool = False,
+    bf16: bool = True,
     report_to: str = "none",
     **kwargs
 ) -> TrainingArguments:
@@ -137,6 +138,7 @@ def create_training_arguments(
         eval_steps=eval_steps,
         save_steps=save_steps,
         fp16=fp16,
+        bf16=bf16,
         report_to=report_to,
         **kwargs
     )
